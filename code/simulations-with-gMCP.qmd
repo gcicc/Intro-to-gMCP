@@ -1,0 +1,1884 @@
+---
+title: "Simulations using the gMCP package"
+format: 
+   html:
+     code-fold: true
+     toc: true
+     toc-location: left
+     code-summary: "Show the code"
+author: "Greg Cicconetti"
+affiliation: "Takeda"
+execute: 
+  cache: true
+  warning: false
+  error: false
+editor: visual
+---
+
+## Overview
+
+**Objective**: Conduct a simulation to explore the operating characteristics of a series of user-defined graphs, $G_1, ..., G_k$ using a simulated raw p-values.
+
+**Assumptions:**
+
+1.  You have a defined collection of candidate graphs to explore.
+2.  You have a a mechanism to generate p-values (or will appeal to gMCP functionality). In particular, we might consider
+
+-   **Taking a bootstrap based approach to p-value generation**
+
+    -   In this case, we have access to a historic trial. By taking bootstrap samples, we can compute test statistics and then derive p-values.
+    -   Your subsequent trial shares the same characteristics as the previous trial.
+    -   Be wary of this approach if you anticipate heterogeneity among envisaged replicates of the trial
+
+-   **Simulate subject level data**
+
+    -   You may be able to simulate raw (and possibly correlated) subject responses, compute test statistics and then derive p-values.
+
+-   **Simulate test statistics**
+
+    -   You may be able to simulate test statistics (possibly reflecting correlation) by appealing to say a MV normal distribution) and then derive p-values.
+
+-   **Simulate by appeal to the gMCP functionality**
+
+    -   Functionality exists for specifying a vector of non-centrality parameters and correlation matrix associated with MV Normal assumption on test statistics. An important step here is to understand the relationship between NCP and desired power to dial into power scenarios of interest. This will be demo'd.
+    -   The noncentrality parameter (NCP) of a Z-statistic $$ Z = \frac{\frac{1}{n}\sum_{i=1}^{n}X_i - \mu_0} {\sigma_x}\sqrt{n}$$
+    -   With $X_1, X_2, ..., X_n$ i.i.d. $N(\mu_x, \sigma_x)$ is $$NCP = \frac{\mu_x - \mu_0}{\sigma_x}\sqrt{n}$$
+
+-   **Simulate p-values directly**
+
+    -   If you have a mechanism to generate p-values directly, it will be important to demonstrate how these track back to scenarios of interest.
+
+3.  Given p-values and graphs, some code is then needed to return adjusted p-values and reject/retain conclusions.
+4.  Some post-processing then allows us to assess the operating characteristics.
+
+## Prep work
+
+::: callout-caution
+Make sure you have JAVA installed if you plan to use the gMCP::graphGUI interface.
+:::
+
+### Load Packages
+
+```{r}
+#| message: false
+require(tidyverse)
+library(readr)
+require(broom)
+require(parallel)
+require(gridExtra)
+require(gMCP)
+require(gt)
+require(here)
+```
+
+### Helper functions
+
+This function initiates parallel computing using the parallel package.
+
+```{r}
+#| message: false
+goparallel <- function(ncores = 7)
+{
+  cat(paste("\nCurrent Connections: ", dim(showConnections())[1], "\n"))
+  cat("\nClosing any open connections...\n")
+  #closeAllConnections()
+  if (exists("cl"))
+    remove(cl)
+  cat(paste("\nCurrent Connections: ", dim(showConnections())[1], "\n"))
+  cat(paste("\nStarting new cluster with", ncores, "cores...\n"))
+  cl <<- parallel::makeCluster(spec = ncores, type = "PSOCK")
+  cat(" Cluster initiation complete\n")
+  cat(paste("\nCurrent Connections: ", dim(showConnections())[1], "\n"))
+  cat(paste("\n", exists("cl"), "\n"))
+  
+  parallel::clusterEvalQ(cl = cl, expr = {
+    require(tidyverse)
+  })
+  cat(
+    "\n\n***\nThe tidyverse pacakge has been sent to each core.\nDo you need other
+      parallel::clusterEvalQ or parallel::clusterExport calls before running your code?\n****\n"
+  )
+}
+```
+
+## Getting acquainted with fictitious trial
+
+Imagine that we wish to replicate this historic trial, perhaps at a different sample size. One approach to consider is taking bootstrap samples from this historic trial, running tests and collecting the raw p-values. (We will use these p-values with the graphical testing procedures we will define later.)
+
+In this section we'll
+
+1.  Load data from a fictitious historic trial
+2.  Inspect data set
+
+::: callout-important
+## You can skip this!
+
+Without loss of generality, one can appeal to the file 'bootstrapped pvalues.csv', which is what will be used to evaluate graphs we define elsewhere.
+:::
+
+### Load data from fictitious historic trial
+
+Here's a fictitious historic trial.
+
+```{r}
+#| message: false
+eyecare_data <- read_csv(here("data", "eyecare-data.csv"))
+```
+
+### Inspect data set
+
+#### Let's see what patients provide
+
+We can also filter by Hyp.No to focus on a hypothesis of interest.
+
+```{r}
+eyecare_data %>%
+  filter(SUBJID == unique(SUBJID)[1]) %>%
+  arrange(Hyp.No) %>%
+  select(Hyp.No, everything(),-SUBJID) %>%
+  gt()
+```
+
+-   Not all combinations are covered, but we see
+    -   Categories: Mesopic/Photopic
+    -   Method: Distance corrected near, Distance corrected intermediate
+    -   Day: 1, 14
+    -   Hour: 0.25, 0.5, 1, 3, 6
+
+## Define Candidate Graphs
+
+::: callout-important
+We'll use these graphs throughout our exercises.
+:::
+
+Let's define a series of candidate graphs to explore via simulation.
+
+### Steps include:
+
+1.  Create graphic using gMCP::graphGUI.
+2.  Hit the 'Play Button'.
+
+![](images/play.png){fig-align="center"}
+
+3.  Copy the code from the resulting dialog box which we'll subsequently modify.
+
+![](images/get-code.png){fig-align="center"}
+
+### Bonferroni
+
+This is the standard Bonferroni adjustment expressed as a graph.
+
+```{r}
+m <- rbind(
+  H1 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H2 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H3 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H4 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H5 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H6 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H7 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H8 = c(0, 0, 0, 0, 0, 0, 0, 0))
+weights <- c(0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125, 0.125)
+graph.Bonferroni <- new("graphMCP", m = m, weights = weights)
+```
+
+![Bonferroni](images/graph.Bonferroni.png){fig-align="center"}
+
+### Fixed Sequence
+
+This is the standard Fixed Sequence adjustment expressed as a graph.
+
+```{r}
+m <- rbind(
+  H1 = c(0, 1, 0, 0, 0, 0, 0, 0),
+  H2 = c(0, 0, 1, 0, 0, 0, 0, 0),
+  H3 = c(0, 0, 0, 1, 0, 0, 0, 0),
+  H4 = c(0, 0, 0, 0, 1, 0, 0, 0),
+  H5 = c(0, 0, 0, 0, 0, 1, 0, 0),
+  H6 = c(0, 0, 0, 0, 0, 0, 1, 0),
+  H7 = c(0, 0, 0, 0, 0, 0, 0, 1),
+  H8 = c(0, 0, 0, 0, 0, 0, 0, 0))
+weights <- c(1, 0, 0, 0, 0, 0, 0, 0)
+graph.fixedSequence <- new("graphMCP", m = m, weights = weights)
+```
+
+![Fixed Sequence](images/graph.fixedSequence.png){fig-align="center"}
+
+### Bonferroni-Holm
+
+This is the Bonferroni-Holm graph courtesy of the gMCP GUI.
+
+```{r}
+m <- rbind(
+  H1=c(0, 1/7, 1/7, 1/7,  1/7, 1/7, 1/7, 1/7 ),
+  H2=c(1/7, 0, 1/7, 1/7,  1/7, 1/7, 1/7, 1/7 ),
+  H3=c(1/7, 1/7, 0, 1/7,  1/7, 1/7, 1/7, 1/7 ),
+  H4=c(1/7, 1/7, 1/7, 0,  1/7, 1/7, 1/7, 1/7 ),
+  H5=c(1/7, 1/7, 1/7, 1/7,  0, 1/7, 1/7, 1/7),
+  H6=c(1/7, 1/7, 1/7, 1/7,  1/7, 0, 1/7, 1/7),
+  H7=c(1/7, 1/7, 1/7, 1/7,  1/7, 1/7, 0, 1/7),
+  H8=c(1/7, 1/7, 1/7, 1/7,  1/7, 1/7, 1/7, 0))
+weights <- c(0.125, 0.125, 0.125, 0.125, 0.125, 
+             0.125, 0.125, 0.125)
+graph.BonHolm <- new("graphMCP", m=m, weights=weights)
+```
+
+![Bonferroni-Holm](images/graph.BonHolm.png)
+
+### Fallback
+
+This is the Fallback procedure graph courtesy of the gMCP GUI. An improved Fallback would incorporate recycling.
+
+```{r}
+m <- rbind(
+  H1 = c(0, 1, 0, 0, 0, 0, 0, 0),
+  H2 = c(0, 0, 1, 0, 0, 0, 0, 0),
+  H3 = c(0, 0, 0, 1, 0, 0, 0, 0),
+  H4 = c(0, 0, 0, 0, 1, 0, 0, 0),
+  H5 = c(0, 0, 0, 0, 0, 1, 0, 0),
+  H6 = c(0, 0, 0, 0, 0, 0, 1, 0),
+  H7 = c(0, 0, 0, 0, 0, 0, 0, 1),
+  H8 = c(0, 0, 0, 0, 0, 0, 0, 0))
+weights <- c(0.25, 0.25, 0.25, 0.25, 0, 0, 0, 0)
+graph.Fallback <- new("graphMCP", m = m, weights = weights)
+```
+
+![Fallback](images/graph.FallBack.png){fig-align="center"}
+
+### Reminder of Hypotheses
+
++--------------------------------------------------------------------------------------------------------+
+| 1.  MESOPIC VISUAL ACUITY DCN Day 14 1 hr VA 20/40 or better                                           |
+| 2.  MESOPIC VISUAL ACUITY DCN Day 14 3 hr DCNVA 3-Line Improvement and without CDVA \>=-5 Letter Loss  |
+| 3.  PHOTOPIC VISUAL ACUITY DCI Day 14 3 hr CHANGE                                                      |
+| 4.  PHOTOPIC VISUAL ACUITY DCN Day 1 0.25 hr VA 2-lines or more                                        |
+| 5.  PHOTOPIC VISUAL ACUITY DCN Day 1 0.5 hr VA 3-lines or more                                         |
+| 6.  PHOTOPIC VISUAL ACUITY DCN Day 14 1 hr DCNVA 3-Line Improvement and without CDVA \>=-5 Letter Loss |
+| 7.  PHOTOPIC VISUAL ACUITY DCN Day 14 3 hr DCNVA 3-Line Improvement and without CDVA \>=-5 Letter Loss |
+| 8.  PHOTOPIC VISUAL ACUITY DCN Day 14 6 hr VA 2-lines or more                                          |
++--------------------------------------------------------------------------------------------------------+
+
+### Team request 1: Co-primary without recycling
+
+-   **Prioritize**: Day 14 hr 3 DCNVA endpoints. Mesopic and Photopic are of equal interest
+-   **Prioritize**: Time points at 3 hr & 1 hr should be favored over 0.25, 0.5 and 6 hrs.
+-   Based on these: Motivate your own graph structure and initial weights
+
+#### Your Turn: Create your own version that fails to recycle alpha back to the top.
+
+```{r}
+# Your turn
+```
+
+#### Solution: Here is one approach.
+
+```{r}
+# Replace commented lines with the graph you create from the gMCP GUI
+m <- rbind(
+  H1 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H2 = c(0.5, 0, 0, 0, 0, 0, 0.5, 0),
+  H3 = c(0, 0, 0, 0.25, 0.25, 0.25, 0, 0.25),
+  H4 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H5 = c(0, 0, 0, 0, 0, 0, 0, 0),
+  H6 = c(0, 0, 0.25, 0.25, 0.25, 0, 0, 0.25),
+  H7 = c(0, 1/3, 1/3, 0, 0, 1/3,  0, 0),
+  H8 = c(0, 0, 0, 0, 0, 0, 0, 0))
+weights <- c(0, 0.5, 0, 0, 0, 0, 0.5, 0)
+graph.coPrimary.1 <- new("graphMCP", m = m, weights = weights)
+```
+
+![Team request 1: Failing to recycle](images/graph.coPrimary.1.png){fig-align="center"}
+
+### Team request 2: Improve the power with recycling
+
+#### Your Turn: Create your own version that recycles alpha back to the top.
+
+```{r}
+# Your attempt goes here.
+```
+
+#### Solution: Here is one approach.
+
+```{r}
+m <- rbind(
+  H1 = c(0, 0, 0, 0, 0, 0, 1, 0),
+  H2 = c(0.5, 0, 0, 0, 0, 0, 0.5, 0),
+  H3 = c(0, 0, 0, 0.25, 0.25, 0.25, 0, 0.25),
+  H4 = c(0, 1/3, 0, 0, 1/3, 0, 0, 1/3),
+  H5 = c(0, 1/3, 0, 1/3, 0, 0, 0, 1/3),
+  H6 = c(0, 0, 0.25, 0.25, 0.25, 0, 0, 0.25),
+  H7 = c(0, 1/3, 1/3, 0, 0, 1/3,  0, 0),
+  H8 = c(0, 1/3, 0, 1/3, 1/3,  0, 0, 0))
+weights <- c(0, 0.5, 0, 0, 0, 0, 0.5, 0)
+graph.coPrimary.2 <- new("graphMCP", m = m, weights = weights)
+```
+
+![Team request 2: with recycling](images/graph.coPrimary.2.png){fig-align="center"}
+
+### Team request 3: Shared alpha variant
+
+#### Your Turn: Try a version that passes alpha in a fixed sequence WITHIN each group of hypotheses.
+
+```{r}
+# Your attempt goes here.
+```
+
+#### Solution: Here is one approach.
+
+```{r}
+# Replace commented lines with the graph you create from the gMCP GUI
+m <- rbind(
+  H1 = c(0, 0.999, 0, 0.001, 0, 0, 0, 0),
+  H2 = c(0.999, 0, 0.001, 0, 0, 0, 0, 0),
+  H3 = c(0, 0, 0, 0, 0, 1, 0, 0),
+  H4 = c(0, 0, 0, 0, 1, 0, 0, 0),
+  H5 = c(0, 0, 0, 0, 0, 0, 0, 1),
+  H6 = c(0, 0, 0, 0, 0, 0, 1, 0),
+  H7 = c(0, 0, 0, 1, 0, 0, 0, 0),
+  H8 = c(0, 0, 1, 0, 0, 0, 0, 0))
+weights <- c(0.5, 0.5, 0, 0, 0, 0, 0, 0)
+graph.MesoPhoto.FS <- new("graphMCP", m = m, weights = weights)
+```
+
+![Team request 4: Shared alpha variant](images/graph.MesoPhoto.FS.png){fig-align="center"}
+
+### Team request 5: splits alpha within each group of hypotheses
+
+#### Your Turn: Try a version that splits alpha within each group of hypotheses.
+
+```{r}
+# Your attempt goes here.
+```
+
+#### Solution: Here is one approach.
+
+```{r}
+# Replace commented lines with the graph you create from the gMCP GUI
+m <- rbind(
+  H1=c(0, 0.99, 0, 0.01/3, 0.01/3, 0, 0, 0.01/3),
+  H2=c(0.99, 0, 0.01/3, 0, 0, 0.01/3,  0.01/3, 0),
+  H3=c(1/3, 0, 0, 0, 0, 1/3, 1/3,  0),
+  H4=c(0, 1/3, 0, 0, 1/3, 0, 0, 1/3 ),
+  H5=c(0, 1/3, 0, 1/3, 0, 0, 0, 1/3 ),
+  H6=c(1/3, 0, 1/3, 0, 0, 0, 1/3,  0),
+  H7=c(1/3, 0, 1/3, 0, 0, 1/3,  0, 0),
+  H8=c(0, 1/3, 0, 1/3, 1/3,  0, 0, 0))
+weights <- c(0.5, 0.5, 0, 0, 0, 0, 0, 0)
+graph.MesoPhoto.SA <- new("graphMCP", m=m, weights=weights)
+```
+
+![Team request 5: splits alpha WITHIN each group of hypotheses](images/graph.MesoPhoto.SA.png){fig-align="center"}
+
+## P-value generation via bootstrapping
+
+::: callout-tip
+This section offers code to bootstrap sample from the historic data. It concludes by creating a .csv file, "bootstrapped pvalues.csv", which is loaded in the sequel.
+:::
+
+### A function that returns bootstrap based test stats & p-values
+
+Major steps in this function:
+
+1.  Identify unique SUBJID values
+2.  Create a bootstrap sample by sampling unique SUBJID with replacement
+3.  Build the bootstrap sample
+4.  Filter to the Hypothesis of interest and grab summary statistics
+5.  Run the individual tests of hypotheses
+6.  Tidy up the 7 tests of proportion and 1 t-test
+7.  Prepare output to return to user
+8.  Return to user the test statistics and raw p-values for each hypothesis
+
+```{r}
+#' get.boot.based.test.stats
+#'
+#' @param source.data data set used for illustration
+#' @param ssize sample size used for bootstrap sampling
+
+get.boot.based.test.stats <-
+  function(source.data = eyecare_data,
+           ssize = 100) {
+    # Identify unique SUBJID values ----
+    unique.subjects <- unique(source.data$SUBJID)
+    # Create a bootstrap sample by sampling unique SUBJID with replacement----
+    my.boot.subj <-
+      sample(x = unique.subjects,
+             size = ssize,
+             replace = T)
+    
+    # Build the bootstrap sample ----
+    my.boot <-
+      bind_rows(apply(X = matrix(1:length(my.boot.subj)), MARGIN = 1, function(x) {
+        source.data %>%
+          ungroup() %>%
+          filter(SUBJID == my.boot.subj[x]) %>%
+          arrange(Hyp.No) %>%
+          mutate(SUBJID.boot = x)
+      }))
+    # Filter to the Hypothesis of interest and grab summary statistics----
+    t1 <-
+      my.boot %>% dplyr::filter(Hyp.No == 1) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t2 <-
+      my.boot %>% dplyr::filter(Hyp.No == 2) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t4 <-
+      my.boot %>% dplyr::filter(Hyp.No == 4) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t5 <-
+      my.boot %>% dplyr::filter(Hyp.No == 5) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t6 <-
+      my.boot %>% dplyr::filter(Hyp.No == 6) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t7 <-
+      my.boot %>% dplyr::filter(Hyp.No == 7) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t8 <-
+      my.boot %>% dplyr::filter(Hyp.No == 8) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(n = n(), x = sum(response))
+    t3 <-
+      my.boot %>% dplyr::filter(Hyp.No == 3) %>% group_by(Hyp.No, ARMCD) %>%
+      summarize(
+        n = n(),
+        mean = mean(response, na.rm = T),
+        sd = sd(response, na.rm = T)
+      )
+    
+    # Run the individual tests of hypotheses ----
+    # tidy up the 7 tests of proportion and 1 t-test----
+    t1.test <-
+      tidy(prop.test(
+        x = t1$x,
+        n = t1$n,
+        alternative = "less"
+      ))
+    t2.test <-
+      tidy(prop.test(
+        x = t2$x,
+        n = t2$n,
+        alternative = "less"
+      ))
+    t4.test <-
+      tidy(prop.test(
+        x = t4$x,
+        n = t4$n,
+        alternative = "less"
+      ))
+    t5.test <-
+      tidy(prop.test(
+        x = t5$x,
+        n = t5$n,
+        alternative = "less"
+      ))
+    t6.test <-
+      tidy(prop.test(
+        x = t6$x,
+        n = t6$n,
+        alternative = "less"
+      ))
+    t7.test <-
+      tidy(prop.test(
+        x = t7$x,
+        n = t7$n,
+        alternative = "less"
+      ))
+    t8.test <-
+      tidy(prop.test(
+        x = t8$x,
+        n = t8$n,
+        alternative = "less"
+      ))
+    t3.test <-
+      tidy(
+        t.test(
+          x = my.boot %>% dplyr::filter(Hyp.No == 3) %>%
+            dplyr::filter(ARMCD == "Treatment") %>% .$response ,
+          y = my.boot %>% dplyr::filter(Hyp.No == 3) %>%
+            dplyr::filter(ARMCD == "Control") %>% .$response,
+          alternative = "greater"
+        )
+      )
+    # Prepare output to return to user -----
+    for.return <- bind_rows(
+      t1.test %>% select(statistic, p.value) %>%
+        mutate(Hyp.No = 1),
+      t2.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 2),
+      
+      t3.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 3),
+      
+      t4.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 4),
+      
+      t5.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 5),
+      
+      t6.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 6),
+      
+      t7.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 7),
+      
+      t8.test %>% select(statistic, p.value) %>% mutate(Hyp.No = 8)
+    )
+    
+    for.return2 <- data.frame(t(for.return)) %>% slice(1:2)
+    names(for.return2) <- paste0("Hyp.No", 1:ncol(for.return2))
+    
+    for.return2 <- for.return2 %>%
+      mutate(metric = rownames(.)) %>%
+      select(metric, everything())
+    # return to user----
+    return(for.return2)
+  }
+```
+
+#### Test get.boot.based.test.stats
+
+```{r}
+#| eval: false
+# 6 seconds 
+tictoc::tic() 
+get.boot.based.test.stats(ssize=100) 
+get.boot.based.test.stats(ssize=125) 
+get.boot.based.test.stats(ssize=150) 
+get.boot.based.test.stats(ssize=200) 
+tictoc::toc()
+```
+
+### Prepare to build collections of p-values based on bootstrap samples to explore impact of sample size
+
+#### Initiate parallel computing
+
+Steps here include
+
+1.  Initializing parallel computing on laptop
+2.  Loading required packages to each core
+3.  Pushing needed objects to each core
+
+```{r eval=TRUE}
+#| warning: false 
+#| echo: true
+#| message: false
+#| output: false
+
+#### Initiate parallel computing on laptop 
+goparallel(ncores = 7)
+# Load required packages on each core
+parallel::clusterEvalQ(cl = cl, expr = {
+  require(broom)})
+
+# Load R objects to each core
+parallel::clusterExport(cl = cl,
+                        varlist = c("get.boot.based.test.stats", "eyecare_data"))
+```
+
+### Build collection of p-values
+
+-   This code is here for reproducibility.
+-   "bootstrapped pvalues.csv" has already been provided to you among training materials and will be loaded shortly.
+
+For the following sample sizes we will run bootstrap samples
+
+-   n = 100, 125, 150, 175
+-   For each sample size, we will build 1000 bootstrap samples and collect p-values for tests
+
+```{r}
+#| eval: false
+#| message: false
+#| output: false
+simsize <- 1000
+# n = 100 ----
+tictoc::tic() # About 45 minutes to run each
+p.values.100 <-
+  bind_rows(parallel::parApply(
+    cl = cl,
+    X = matrix(1:simsize),
+    MARGIN = 1,
+    FUN = function(x) {
+      set.seed(x)
+      get.boot.based.test.stats(ssize =
+                                  100) %>%
+        mutate(seed = x, case = "n = 100")
+    }
+  ))
+tictoc::toc()
+
+# n = 125 ----
+p.values.125 <- bind_rows(parallel::parApply(
+  cl = cl,
+  X = matrix(1:simsize),
+  MARGIN = 1,
+  FUN = function(x) {
+    set.seed(x)   get.boot.based.test.stats(ssize = 125) %>% mutate(seed = x, case = "n = 125")
+  }
+))
+
+# n = 150 ----
+p.values.150 <-
+  bind_rows(parallel::parApply(
+    cl = cl,
+    X = matrix(1:simsize),
+    MARGIN = 1,
+    FUN = function(x) {
+      set.seed(x)   get.boot.based.test.stats(ssize = 150) %>% mutate(seed = x, case = "n = 150")
+    }
+  ))
+
+# n = 175 ----
+p.values.175 <-
+  bind_rows(parallel::parApply(
+    cl = cl,
+    X = matrix(1:simsize),
+    MARGIN = 1,
+    FUN = function(x) {
+      set.seed(x)   get.boot.based.test.stats(ssize = 175) %>% mutate(seed = x, case = "n = 175")
+    }
+  ))
+```
+
+#### Combined all results and save
+
+This code collates and save results to .csv file.
+
+```{r}
+#| eval: false
+
+# Collate and save bootstrap based p-values
+all.pvalues <-
+  bind_rows(p.values.100, p.values.125, p.values.150, p.values.175)
+rownames(all.pvalues) <- NULL
+
+# This file is provided to you and will be loaded later in this file.
+# View(all.pvalues)
+write.csv(all.pvalues, "bootstrapped pvalues.csv")
+```
+
+## Pushing a single set of p-values through graphs
+
+### First working with single set of p-values and single graph
+
+Let's explore the output after we make a call to gMCP::gMCP. First we create some test p-values.
+
+```{r}
+set.seed(1234)
+test.pvalues <- runif(n = 8, min = 0,max = 0.075)
+```
+
+Let's test with the Fixed Sequence graph.
+
+```{r}
+gMCP.results.fixedSequence <-
+  gMCP(graph.fixedSequence,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+```
+
+Let's inspect the object:
+
+```{r}
+# class(gMCP.results.fixedSequence)
+# str(gMCP.results.fixedSequence)
+gMCP.results.fixedSequence@pvalues # Same as test.pvalues
+gMCP.results.fixedSequence@adjPValues # adjused P-values
+gMCP.results.fixedSequence@rejected # <-- This is what we are after!
+```
+
+### Next working with single set of p-values and multiple graphs
+
+In practice, we'll repeat this for a number of candidate graphs:
+
+```{r}
+gMCP.results.Bonferroni <-
+  gMCP(graph.Bonferroni,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.fixedSequence <-
+  gMCP(graph.fixedSequence,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.BonHolm <-
+  gMCP(graph.BonHolm,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.Fallback <-
+  gMCP(graph.Fallback,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.coPrimary.1 <-
+  gMCP(graph.coPrimary.1,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.coPrimary.2 <-
+  gMCP(graph.coPrimary.2,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.MesoPhoto.FS <-
+  gMCP(graph.MesoPhoto.FS,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+gMCP.results.MesoPhoto.SA <-
+  gMCP(graph.MesoPhoto.SA,
+       test.pvalues,
+       test = "Bonferroni",
+       alpha = 0.025)
+```
+
+Here's sample output (remember this is for a null case example!).
+
+```{r}
+bind_rows(
+  data.frame(t(gMCP.results.fixedSequence@rejected)) %>% mutate(graph = "fixedSequence"),
+  data.frame(t(gMCP.results.BonHolm@rejected)) %>% mutate(graph = "BonHolm"),
+  data.frame(t(gMCP.results.Fallback@rejected)) %>% mutate(graph = "Fallback"),
+  data.frame(t(gMCP.results.coPrimary.1@rejected)) %>% mutate(graph = "coPrimary.1"),
+  data.frame(t(gMCP.results.coPrimary.2@rejected)) %>% mutate(graph = "coPrimary.2"),
+  data.frame(t(gMCP.results.MesoPhoto.FS@rejected)) %>% mutate(graph = "MesoPhoto.FS"),
+  data.frame(t(gMCP.results.MesoPhoto.SA@rejected)) %>% mutate(graph = "MesoPhoto.SA")
+) %>% gt()
+```
+
+### Pushing a series of p-values through graphs
+
+We return back to the p-values generated to explore sample size.
+
+### Load p-values generated earlier
+
+```{r}
+all.pvalues <- read.csv(here("data", "bootstrapped pvalues.csv"))[, -1]
+
+head(all.pvalues) %>%
+  gt() %>% fmt_number(decimals = 3)
+```
+
+#### Inspecting the raw p-values
+
+Power increases with sample size - as expected. Note, we are viewing the raw p-values.
+
+```{r}
+all.pvalues %>% filter(metric == "p.value") %>%
+  group_by(case) %>%
+  summarize(
+    raw.power.H1 = mean(Hyp.No1 < 0.025),
+    raw.power.H2 = mean(Hyp.No2 < 0.025),
+    raw.power.H3 = mean(Hyp.No3 < 0.025),
+    raw.power.H4 = mean(Hyp.No4 < 0.025),
+    raw.power.H5 = mean(Hyp.No5 < 0.025),
+    raw.power.H6 = mean(Hyp.No6 < 0.025),
+    raw.power.H7 = mean(Hyp.No7 < 0.025),
+    raw.power.H8 = mean(Hyp.No8 < 0.025)) %>% gt()
+```
+
+## Preparing computing environment
+
+We prepare a data.frame holding the p-values and pass this along with the graph definitions into the cores we initialized earlier.
+
+```{r}
+#| message: false
+#| output: false
+just.pvalues <-
+  (all.pvalues %>% filter(metric == "p.value")) %>% select(-metric)
+goparallel(ncores = 7)
+parallel::clusterEvalQ(cl = cl, expr = {
+  require(tidyverse)
+  require(gMCP)})
+
+parallel::clusterExport(
+  cl = cl,
+  varlist = c(
+    "just.pvalues",
+    "graph.Bonferroni",
+    "graph.fixedSequence",
+    "graph.BonHolm",
+    "graph.Fallback",
+    "graph.coPrimary.1",
+    "graph.coPrimary.2",
+    "graph.MesoPhoto.FS",
+    "graph.MesoPhoto.SA"  ))
+```
+
+## Parallel computing employed to evaluate graphs over a collection of p-values
+
+::: callout-note
+This code is here for reproducibility. We will skip this and load the created simulation results, from the file "simresults.csv".
+:::
+
+```{r}
+#| eval: false
+tictoc::tic() # 67.71 sec elapsed
+my.results <- bind_rows(parApply(
+  cl = cl,
+  MARGIN = 1,
+  X = matrix(1:nrow(just.pvalues)),
+  FUN = function(x) {
+    # For each simulated trial, get the results of applying each candidate graph ----
+    
+    gMCP.results.Bonferroni <-
+      gMCP(graph.Bonferroni,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.fixedSequence <-
+      gMCP(graph.fixedSequence,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.BonHolm <-
+      gMCP(graph.BonHolm,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.Fallback <-
+      gMCP(graph.Fallback,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.coPrimary.1 <-
+      gMCP(graph.coPrimary.1,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.coPrimary.2 <-
+      gMCP(graph.coPrimary.2,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.MesoPhoto.FS <-
+      gMCP(graph.MesoPhoto.FS,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    gMCP.results.MesoPhoto.SA <-
+      gMCP(graph.MesoPhoto.SA,
+           as.vector(t(just.pvalues[x, 1:8])),
+           test = "Bonferroni",
+           alpha = 0.025)
+    
+    # Return the outcome, taking on graph labels, seed and case identifiers ----
+    bind_rows(
+      data.frame(t(gMCP.results.Bonferroni@rejected)) %>% mutate(graph = "Bonferroni"),
+      data.frame(t(gMCP.results.fixedSequence@rejected)) %>% mutate(graph = "fixedSequence"),
+      data.frame(t(gMCP.results.BonHolm@rejected)) %>% mutate(graph = "BonHolm"),
+      data.frame(t(gMCP.results.Fallback@rejected)) %>% mutate(graph = "Fallback"),
+      data.frame(t(gMCP.results.coPrimary.1@rejected)) %>% mutate(graph = "coPrimary.1"),
+      data.frame(t(gMCP.results.coPrimary.2@rejected)) %>% mutate(graph = "coPrimary.2"),
+      data.frame(t(gMCP.results.MesoPhoto.FS@rejected)) %>% mutate(graph = "MesoPhoto.FS"),
+      data.frame(t(gMCP.results.MesoPhoto.SA@rejected)) %>% mutate(graph = "MesoPhoto.SA")
+    ) %>% mutate(seed = just.pvalues$seed[x],
+                 case = just.pvalues$case[x])
+  }
+))
+tictoc::toc()
+write.csv(x = my.results, "output/simresults.csv")
+```
+
+### Inspect results of simulation investigating graphs and sample sizes
+
+```{r}
+my.results <- read.csv(here("output", "simresults.csv"))[, -1]
+head(my.results) %>% gt()
+```
+
+#### Results by sample size
+
+Let's look summaries for n=100 and n=175
+
+```{r}
+my.results %>%
+  group_by(graph, case) %>% summarize(
+    Any = mean(H1 + H2 + H3 + H4 + H5 + H6 + H7 + H8 > 0),
+    H1 = mean(H1),
+    H2 = mean(H2),
+    H3 = mean(H3),
+    H4 = mean(H4),
+    H5 = mean(H5),
+    H6 = mean(H6),
+    H7 = mean(H7),
+    H8 = mean(H8)) %>%
+  filter(case %in% c("n = 100", "n = 175")) %>%
+  gt()
+```
+
+#### Comparison of Bonferroni and Bonferroni-Holm
+
+```{r}
+my.results %>%
+  group_by(case, graph) %>%
+  summarize(
+    Any = mean(H1 + H2 + H3 + H4 + H5 + H6 + H7 + H8 > 0),
+    H1 = mean(H1),
+    H2 = mean(H2),
+    H3 = mean(H3),
+    H4 = mean(H4),
+    H5 = mean(H5),
+    H6 = mean(H6),
+    H7 = mean(H7),
+    H8 = mean(H8)  ) %>%
+  filter(graph %in% c("Bonferroni", "BonHolm")) %>%
+  gt()
+```
+
+#### Comparison of Fallback and Bonferroni-Holm
+
+-   Fallback enjoys higher power for earlier hypotheses.
+-   Bonferroni-Holm does better with later hypotheses.
+
+```{r}
+my.results %>% group_by(case, graph) %>%
+  summarize(
+    Any = mean(H1 + H2 + H3 + H4 + H5 + H6 + H7 + H8 > 0),
+    H1 = mean(H1),
+    H2 = mean(H2),
+    H3 = mean(H3),
+    H4 = mean(H4),
+    H5 = mean(H5),
+    H6 = mean(H6),
+    H7 = mean(H7),
+    H8 = mean(H8)  ) %>%
+  filter(graph %in% c("BonHolm", "Fallback")) %>%
+  gt()
+```
+
+#### Comparison of CoPrimary.1 and CoPrimary.2
+
+-   Recycling alpha pays off.
+
+```{r}
+my.results %>% group_by(case, graph) %>%
+  summarize(
+    Any = mean(H1 + H2 + H3 + H4 + H5 + H6 + H7 + H8 > 0),
+    H1 = mean(H1),
+    H2 = mean(H2),
+    H3 = mean(H3),
+    H4 = mean(H4),
+    H5 = mean(H5),
+    H6 = mean(H6),
+    H7 = mean(H7),
+    H8 = mean(H8)  ) %>%
+  filter(graph %in% c("coPrimary.1", "coPrimary.2")) %>%
+  gt()
+```
+
+#### Bonferroni-Holm vs. Team motivated versions employing fixed sequence and alpha sharing components.
+
+-   BonHolm has slightly higher disjunctive power, but the two alternative perform much better on H1 and H2.
+
+```{r}
+#| message: false
+my.results %>%
+  group_by(case, graph) %>%
+  summarize(
+    Any = mean(H1 + H2 + H3 + H4 + H5 + H6 + H7 + H8 > 0),
+    H1 = mean(H1),
+    H2 = mean(H2),
+    H3 = mean(H3),
+    H4 = mean(H4),
+    H5 = mean(H5),
+    H6 = mean(H6),
+    H7 = mean(H7),
+    H8 = mean(H8)) %>%
+  filter(graph %in% c("BonHolm", "MesoPhoto.FS", "MesoPhoto.SA")) %>% gt()
+```
+
+## gMCP based approach relying on MV normal distribution
+
+We'll now leveraging the simulation capabilities of the gMCP package
+
+### Understanding role of non-centrality parameter
+
+Create a list holding a common values of the Non-Centrality parameter
+
+```{r}
+my.list <- list()
+for (i in seq(0, 6, length.out = 1001)) {
+  my.list[[length(my.list) + 1]] <- rep(i, 8)}
+
+my.short.list <- list()
+for (i in seq(0, 6, length.out = 101)) {
+  my.short.list[[length(my.short.list) + 1]] <- rep(i, 8)}
+```
+
+### Quick inspection
+
+```{r}
+# Examples
+my.list[[1]]
+my.list[[50]]
+my.list[[101]]
+```
+
+## Setting up additional items to monitor
+
+::: callout-tip
+Use the gMCP::graphGUI power analysis features found on the Analysis Tab menu to get code along lines of next chunk.
+:::
+
+```{r}
+f <- list('sum(x)>=1'=function(x) {sum(x)>=1},
+          'sum(x)>=2'=function(x) {sum(x)>=2},
+          'sum(x)>=3'=function(x) {sum(x)>=3},
+          'sum(x)>=4'=function(x) {sum(x)>=4},
+          'sum(x)>=5'=function(x) {sum(x)>=5},
+          'sum(x)>=6'=function(x) {sum(x)>=6},
+          'sum(x)>=7'=function(x) {sum(x)>=7},
+          'sum(x)>=8'=function(x) {sum(x)>=8})
+```
+
+## Defining the correlation matrix
+
+Here we start with a simple diagonal matrix.
+
+```{r}
+corr.sim <- rbind(c(1, 0, 0, 0, 0, 0, 0, 0),
+                  c(0, 1, 0, 0, 0, 0, 0, 0),
+                  c(0, 0, 1, 0, 0, 0, 0, 0),
+                  c(0, 0, 0, 1, 0, 0, 0, 0),
+                  c(0, 0, 0, 0, 1, 0, 0, 0),
+                  c(0, 0, 0, 0, 0, 1, 0, 0),
+                  c(0, 0, 0, 0, 0, 0, 1, 0),
+                  c(0, 0, 0, 0, 0, 0, 0, 1))
+```
+
+## Running a simulations to compare simsize of 50000 vs. 5000
+
+::: callout-tip
+The simulation in this section suggests that 5000 iterations suffices.
+:::
+
+Running a simulation with 50000 iterations.
+
+```{r}
+set.seed(1234)
+tictoc::tic() # 89.26 sec elapsed
+result.Bonferroni <- calcPower(
+  graph = graph.Bonferroni,
+  mean = my.short.list,
+  f = f,
+  type = "quasirandom",
+  corr.sim = corr.sim,
+  alpha = 0.025,
+  n.sim = 50000)
+tictoc::toc()
+
+temp <-
+  apply(X = matrix(1:length(result.Bonferroni)), MARGIN = 1, function(x)
+    result.Bonferroni[[x]]$LocalPower)
+
+result.Bonferroni.0.50000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>%
+  rename(PowerEst = H1)
+```
+
+Now running simulations with 5000 iterations.
+
+```{r}
+tictoc::tic() # 10.97 sec elapsed
+result.Bonferroni <- calcPower(
+  graph = graph.Bonferroni,
+  mean = my.short.list,
+  f = f,
+  type = "quasirandom",
+  corr.sim = corr.sim,
+  alpha = 0.025,
+  n.sim = 5000)
+tictoc::toc()
+
+tictoc::tic()
+temp <- apply(X = matrix(1:length(result.Bonferroni)), MARGIN = 1,
+              function(x)
+                result.Bonferroni[[x]]$LocalPower)
+
+result.Bonferroni.0.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>%
+  rename(PowerEst = H1)
+tictoc::toc()
+
+# inspect these
+# result.Bonferroni.0.50000
+# result.Bonferroni.0.5000
+```
+
+Let's compare.
+
+```{r}
+# View(result.Bonferroni.0.5000)
+NCP.lookup <- bind_rows(
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst -0.7) == min(abs(PowerEst -0.7))),
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst -0.75) == min(abs(PowerEst - 0.75))),
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst - 0.80) == min(abs(PowerEst - 0.8))),
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst - 0.85) == min(abs(PowerEst - 0.85))),
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst - 0.9) == min(abs(PowerEst - 0.9))),
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst - 0.925) == min(abs(PowerEst - 0.925))),
+  result.Bonferroni.0.5000 %>%
+    filter(abs(PowerEst - 0.95) == min(abs(PowerEst - 0.95))))
+```
+
+**Conclusion**: A simulation of 5000 is sufficient to gain insights.
+
+```{r}
+# A simulation of 5000 is sufficient to gain insights
+for.inspection <- bind_cols(result.Bonferroni.0.50000,
+          result.Bonferroni.0.5000) 
+  names(for.inspection) <- c("NCP", "Power.50k", "NCP2", "Power.5k")
+  
+for.inspection %>% select(-NCP2) %>% sample_n(15) %>% arrange(NCP) %>%
+  gt()
+```
+
+### Role of correlation
+
+::: callout-note
+We may wish to assess the impact of correlation structure. We consider a few correlation matrix.
+:::
+
+This code simply returns four matrices with 1's along diagonals with off diagonals populated by 0.2, 0.4, ..., 0.8.
+
+```{r}
+corr.sim <- rbind(
+  c(1, 0, 0, 0, 0, 0, 0, 0),
+  c(0, 1, 0, 0, 0, 0, 0, 0),
+  c(0, 0, 1, 0, 0, 0, 0, 0),
+  c(0, 0, 0, 1, 0, 0, 0, 0),
+  c(0, 0, 0, 0, 1, 0, 0, 0),
+  c(0, 0, 0, 0, 0, 1, 0, 0),
+  c(0, 0, 0, 0, 0, 0, 1, 0),
+  c(0, 0, 0, 0, 0, 0, 0, 1))
+
+corr.sim.2 <-
+  corr.sim + matrix(data = 0.2, nrow = 8, ncol = 8) - diag(x = 0.2, nrow = 8, ncol = 8)
+corr.sim.4 <-
+  corr.sim + matrix(data = 0.4, nrow = 8, ncol = 8) - diag(x = 0.4, nrow = 8, ncol = 8)
+corr.sim.6 <-
+  corr.sim + matrix(data = 0.6, nrow = 8, ncol = 8) - diag(x = 0.6, nrow = 8, ncol = 8)
+corr.sim.8 <-
+  corr.sim + matrix(data = 0.8, nrow = 8, ncol = 8) - diag(x = 0.8, nrow = 8, ncol = 8)
+```
+
+#### Exploring the impact of correlation in a single graph
+
+This code will run simulations using gMCP::calcPower. We will need to post-process these results.
+
+```{r}
+result.Bonferroni.2 <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.2,
+    alpha = 0.025,
+    n.sim = 5000)
+
+result.Bonferroni.4 <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.4,
+    alpha = 0.025,
+    n.sim = 5000)
+
+result.Bonferroni.6 <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.6,
+    alpha = 0.025,
+    n.sim = 5000)
+
+result.Bonferroni.8 <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.8,
+    alpha = 0.025,
+    n.sim = 5000)
+```
+
+#### Data manipulation of simulations
+
+This code process the simulation results into a more digestible form.
+
+```{r}
+temp <-
+  apply(X = matrix(1:length(result.Bonferroni.2)), MARGIN = 1, function(x)
+    result.Bonferroni.2[[x]]$LocalPower)
+result.Bonferroni.2.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>% 
+  select(NCP, H1) %>%
+  rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.Bonferroni.4)), MARGIN = 1, function(x)
+    result.Bonferroni.4[[x]]$LocalPower)
+
+result.Bonferroni.4.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>% select(NCP, H1) %>%
+  rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.Bonferroni.6)), MARGIN = 1, function(x)
+    result.Bonferroni.6[[x]]$LocalPower)
+
+result.Bonferroni.6.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>% select(NCP, H1) %>%
+  rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.Bonferroni.8)), MARGIN = 1, function(x)
+    result.Bonferroni.6[[x]]$LocalPower)
+
+result.Bonferroni.8.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>% select(NCP, H1) %>%
+  rename(PowerEst = H1)
+```
+
+#### Comparison of Bonferroni in the presence of correlated endpoints
+
+Conclusion: Correlation plays no role using Bonferroni.
+
+```{r}
+bind_rows(
+  result.Bonferroni.0.5000 %>% mutate(corr = 0),
+  result.Bonferroni.2.5000 %>% mutate(corr = 0.2),
+  result.Bonferroni.4.5000 %>% mutate(corr = 0.4),
+  result.Bonferroni.6.5000 %>% mutate(corr = 0.6),
+  result.Bonferroni.8.5000 %>% mutate(corr = 0.8)) %>%
+  ggplot(aes(
+    x = NCP,
+    y = PowerEst,
+    color = factor(corr),
+    group = corr)) +
+  geom_line(linewidth = 1) +
+  labs(color = "Correlation", 
+       title = "NCP associated with Power in the presence of correlation - Bonferroni case")
+```
+
+#### Bonferroni-Holm case
+
+```{r}
+tictoc::tic()
+result.BonHolm.0 <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000)
+
+result.BonHolm.2 <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.2,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.BonHolm.4 <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.4,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.BonHolm.6 <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.6,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.BonHolm.8 <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim.8,
+    alpha = 0.025,
+    n.sim = 5000  )
+tictoc::toc()
+```
+
+##### Data manipulation of simulations
+
+```{r}
+temp <-
+  apply(X = matrix(1:length(result.BonHolm.0)), MARGIN = 1, function(x)
+    result.BonHolm.0[[x]]$LocalPower)
+result.BonHolm.0.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>% rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.BonHolm.2)), MARGIN = 1, function(x)
+    result.BonHolm.2[[x]]$LocalPower)
+result.BonHolm.2.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>% rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.BonHolm.4)), MARGIN = 1, function(x)
+    result.BonHolm.4[[x]]$LocalPower)
+result.BonHolm.4.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>% rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.BonHolm.6)), MARGIN = 1, function(x)
+    result.BonHolm.6[[x]]$LocalPower)
+result.BonHolm.6.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>% rename(PowerEst = H1)
+
+temp <-
+  apply(X = matrix(1:length(result.BonHolm.8)), MARGIN = 1, function(x)
+    result.BonHolm.6[[x]]$LocalPower)
+result.BonHolm.8.5000 <- as.data.frame(round(t(temp), 4)) %>%
+  mutate(NCP = seq(0, 6, length.out = 101)) %>%
+  select(NCP, H1) %>% rename(PowerEst = H1)
+```
+
+##### Comparing Bonferroni and Bonferroni-Holm in the presense of correlated endpoints
+
+It appears that results are relatively robust to underlying correlation matrix among those investigated for these two graphs.
+
+```{r}
+bind_rows(
+  result.Bonferroni.0.5000 %>% mutate(corr = 0, graph = "Bonferroni"),
+  result.Bonferroni.2.5000 %>% mutate(corr = 0.2, graph = "Bonferroni"),
+  result.Bonferroni.4.5000 %>% mutate(corr = 0.4, graph = "Bonferroni"),
+  result.Bonferroni.6.5000 %>% mutate(corr = 0.6, graph = "Bonferroni"),
+  result.Bonferroni.8.5000 %>% mutate(corr = 0.8, graph = "Bonferroni"),
+  result.BonHolm.0.5000 %>% mutate(corr = 0, graph = "BonHolm"),
+  result.BonHolm.2.5000 %>% mutate(corr = 0.2, graph = "BonHolm"),
+  result.BonHolm.4.5000 %>% mutate(corr = 0.4, graph = "BonHolm"),
+  result.BonHolm.6.5000 %>% mutate(corr = 0.6, graph = "BonHolm"),
+  result.BonHolm.8.5000 %>% mutate(corr = 0.8, graph = "BonHolm")) %>%
+  ggplot(aes(
+    x = NCP,
+    y = PowerEst,
+    color = factor(corr),
+    group = corr  )) +
+  geom_line(linewidth = 1) +
+  facet_wrap( ~ graph)
+```
+
+## Calibrating NCP to power targets for purpose of targeted power simulations.
+
+::: callout-caution
+This step is needed and must be tailored for your setting of you are to use the gMCP functions to assess operating characteristics.
+:::
+
+```{r}
+NCP.values <- c(0, 0.77, 2.98, 3.25, 3.59, 4.02)
+result.Bonferroni.0.5000 %>%
+  ggplot(aes(x = NCP, y = PowerEst)) +
+  geom_line() +
+  geom_vline(xintercept = NCP.values,
+             linetype = 2,
+             col = "grey60") +
+  geom_hline(
+    yintercept = c(0, 0.025, 0.6, 0.7, 0.8, 0.9),
+    linetype = 2,
+    col = "grey60"  ) +
+  labs(title = "Relationship between Non-centrality parameter and Power",
+       subtitle = "Bonferroni adjustment is used.")
+```
+
+### Building a short list of non-centrality parameters to run simulations with
+
+#### Simple setting Equal treatment effects for each hypotheses
+
+Purpose is to provide a quick way to compare graphics to traditional Bonferroni and Bonferroni-Holm and observe the power of other graphics in simplistic settings where all hypotheses are similarly powered.
+
+```{r}
+tictoc::tic() # 5.17 sec elapsed
+my.short.list <- list(rep(0, 8),
+                      rep(0.77, 8),
+                      rep(2.98, 8),
+                      rep(3.25, 8),
+                      rep(3.59, 8),
+                      rep(4.02, 8))
+
+# Bonferroni
+temp.Bonferroni <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.Bonferroni <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.Bonferroni)), MARGIN = 1,
+          function(x)
+            temp.Bonferroni[[x]]$LocalPower)  )) %>%
+  data.frame(NCP = NCP.values, case = "Bonferroni")
+
+# fixedSequence
+temp.fixedSequence <-
+  calcPower(
+    graph = graph.fixedSequence,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+result.fixedSequence <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.fixedSequence)), MARGIN = 1, function(x)
+      temp.fixedSequence[[x]]$LocalPower)  )) %>%
+  data.frame(NCP = NCP.values, case = "fixedSequence")
+
+# Bonferroni-Holm
+temp.BonHolm <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000)
+result.BonHolm <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.BonHolm)), MARGIN = 1, function(x)
+      temp.BonHolm[[x]]$LocalPower)  )) %>%
+  data.frame(NCP = NCP.values, case = "BonHolm")
+
+# Fallback
+temp.Fallback <-
+  calcPower(
+    graph = graph.Fallback,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000)
+
+result.Fallback <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.Fallback)),
+          MARGIN = 1, function(x)
+            temp.Fallback[[x]]$LocalPower)  )) %>%  data.frame(NCP = NCP.values, case = "Fallback")
+
+temp.coPrimary.1 <-
+  calcPower(
+    graph = graph.coPrimary.1,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.coPrimary.1 <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.coPrimary.1)), MARGIN = 1, function(x)
+      temp.coPrimary.1[[x]]$LocalPower)
+  )) %>%  data.frame(NCP = NCP.values, case = "coPrimary.1")
+
+temp.coPrimary.2 <-
+  calcPower(
+    graph = graph.coPrimary.2,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.coPrimary.2 <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.coPrimary.2)), MARGIN = 1, function(x)
+      temp.coPrimary.2[[x]]$LocalPower)
+  )) %>% data.frame(NCP = NCP.values, case = "coPrimary.2")
+
+temp.MesoPhoto.FS <-
+  calcPower(
+    graph = graph.MesoPhoto.FS,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.MesoPhoto.FS <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.MesoPhoto.FS)), MARGIN = 1, function(x)
+      temp.MesoPhoto.FS[[x]]$LocalPower)
+  )) %>%  data.frame(NCP = NCP.values, case = "MesoPhoto.FS")
+
+temp.MesoPhoto.SA <-
+  calcPower(
+    graph = graph.MesoPhoto.SA,
+    mean = my.short.list,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.MesoPhoto.SA <-
+  data.frame(t(
+    apply(X = matrix(1:length(temp.MesoPhoto.SA)), MARGIN = 1, function(x)
+      temp.MesoPhoto.SA[[x]]$LocalPower)
+  )) %>%
+  data.frame(NCP = NCP.values, case = "MesoPhoto.FS")
+tictoc::toc()
+```
+
+### Results: Bonferroni vs. Bonferroni-Holm
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA) %>%
+  filter(case %in% c("Bonferroni", "BonHolm")) %>%
+  arrange(NCP, case) %>%
+  select(NCP, case, everything()) %>% gt()
+```
+
+### Results: Bonferroni vs. Fallback
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA) %>%
+  filter(case %in% c("Bonferroni", "Fallback")) %>%
+  arrange(NCP, case) %>%
+  select(NCP, case, everything()) %>% gt()
+```
+
+### Results: Bonferroni vs. CoPrimary.1, coPrimary.2
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA) %>%
+  filter(case %in% c("Bonferroni", "coPrimary.1",
+                     "coPrimary.2")) %>%
+  arrange(NCP, case) %>%
+  select(NCP, case, everything()) %>% gt()
+```
+
+### Results: Bonferroni vs. result.MesoPhoto.FS, result.MesoPhoto.SA
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA) %>%
+  filter(case %in% c("Bonferroni", "MesoPhoto.FS", "MesoPhoto.SA")) %>%
+  arrange(NCP, case) %>%
+  select(NCP, case, everything()) %>% gt()
+```
+
+## Fictitious example
+
+Assume treatment effects are linked to the following collection of non-centrality parameters
+
+```{r}
+set.seed(1234)
+my.NCP <- runif(n = 8, min = 3.25, max = 4.02)
+```
+
+In this way, we will be exploring how graphs perform when the marginal power (under Bonferroni) associated with the hypotheses are approximately:
+
+```{r}
+temp.Bonferroni <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+temp.Bonferroni$LocalPower
+```
+
+### Run simulations
+
+```{r}
+# Bonferroni
+temp.Bonferroni <-
+  calcPower(
+    graph = graph.Bonferroni,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.Bonferroni <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.Bonferroni$LocalPower)  )) %>%
+  data.frame(case = "Bonferroni")
+
+# fixedSequence
+temp.fixedSequence <-
+  calcPower(
+    graph = graph.fixedSequence,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.fixedSequence <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.fixedSequence$LocalPower)  )) %>%
+  data.frame(case = "fixedSequence")
+
+# Bonferroni-Holm
+temp.BonHolm <-
+  calcPower(
+    graph = graph.BonHolm,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.BonHolm <-
+  data.frame(t(apply(X = matrix(1:1), MARGIN = 1, function(x)
+    temp.BonHolm$LocalPower))) %>%
+  data.frame(case = "BonHolm")
+
+# Fallback
+temp.Fallback <-
+  calcPower(
+    graph = graph.Fallback,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+result.Fallback <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.Fallback$LocalPower)  )) %>%
+  data.frame(case = "Fallback")
+
+temp.coPrimary.1 <-
+  calcPower(
+    graph = graph.coPrimary.1,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+result.coPrimary.1 <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.coPrimary.1$LocalPower)  )) %>%
+  data.frame(case = "coPrimary.1")
+
+temp.coPrimary.2 <-
+  calcPower(
+    graph = graph.coPrimary.2,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.coPrimary.2 <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.coPrimary.2$LocalPower)  )) %>%
+  data.frame(case = "coPrimary.2")
+
+temp.MesoPhoto.FS <-
+  calcPower(
+    graph = graph.MesoPhoto.FS,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+result.MesoPhoto.FS <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.MesoPhoto.FS$LocalPower)  )) %>%
+  data.frame(case = "MesoPhoto.FS")
+
+temp.MesoPhoto.SA <-
+  calcPower(
+    graph = graph.MesoPhoto.SA,
+    mean = my.NCP,
+    f = f,
+    type = "quasirandom",
+    corr.sim = corr.sim,
+    alpha = 0.025,
+    n.sim = 5000  )
+
+result.MesoPhoto.SA <-
+  data.frame(t(
+    apply(X = matrix(1:1), MARGIN = 1, function(x)
+      temp.MesoPhoto.SA$LocalPower))) %>%
+  data.frame(case = "MesoPhoto.SA")
+ 
+```
+
+### All results
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA) %>% 
+  select(case, everything()) %>%
+  gt() %>% fmt_number(decimals = 3)
+```
+
+### Results: Bonferroni vs. Bonferroni-Holm
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA) %>%
+  filter(case %in% c("Bonferroni", "BonHolm")) %>% 
+  arrange(case) %>% 
+  gt() %>% fmt_number(decimals = 3)
+```
+
+### Results: Bonferroni vs. Fallback
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA
+) %>%
+  filter(case %in% c("Bonferroni", "Fallback")) %>%
+  arrange(case) %>% gt() %>% fmt_number(decimals = 3)
+```
+
+### Results: Bonferroni vs. CoPrimary.1, coPrimary.2
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA
+) %>%
+  filter(case %in% c("Bonferroni", "coPrimary.1", "coPrimary.2")) %>% 
+  arrange(case)%>% gt() %>% fmt_number(decimals = 3)
+```
+
+### Results: Bonferroni vs. result.MesoPhoto.FS, result.MesoPhoto.SA
+
+```{r}
+bind_rows(
+  result.Bonferroni,
+  result.fixedSequence,
+  result.BonHolm,
+  result.Fallback,
+  result.coPrimary.1,
+  result.coPrimary.2,
+  result.MesoPhoto.FS,
+  result.MesoPhoto.SA
+) %>%
+  filter(case %in% c("Bonferroni", "MesoPhoto.FS", "MesoPhoto.SA")) %>% 
+  arrange(case)%>% gt() %>% fmt_number(decimals = 3)
+```
+
+## Reference Materials
+
+-   GUIDANCE D. Multiple endpoints in clinical trials guidance for industry. Center for Biologics Evaluation and Research (CBER). 2017 Jan.
+-   Huque, M. Mushti, S. Alpha-recycling for the analyses of primary and secondary endpoints of clinical trials. Presentation slides.
+-   Wang B, Ting N. An application of graphical approach to construct multiple testing procedures in a hypothetical Phase III design. Frontiers in public health. 2014 Jan 7;1:75.
+-   Rohmeyer, K. gMCP - an R package for a graphical approach to weighted multiple test procedures. gMCP package vignette.
+-   Bretz F, Maurer W, Brannath W, Posch M. A graphical approach to sequentially rejective multiple test procedures. Statistics in medicine. 2009 Feb 20;28(4):586-604.
+-   Posch M. A graphical approach to sequentially rejective multiple test procedures.
+-   Bretz F, Posch M, Glimm E, Klinglmueller F, Maurer W, Rohmeyer K. Graphical approaches for multiple comparison procedures using weighted Bonferroni, Simes, or parametric tests. Biometrical Journal. 2011 Nov;53(6):894-913.
+    -   Bretz, F. Xun, X. Introduction to Multiplicity in Clinical Trials. Presentation Slides.

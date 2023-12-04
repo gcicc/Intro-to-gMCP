@@ -1,0 +1,12 @@
+name: intro-to-gmcp-code2
+title: intro-to-gMCP-code
+username: eri7441
+account: eri7441
+server: dev-connect.rda.onetakeda.com
+hostUrl: https://dev-connect.rda.onetakeda.com/__api__
+appId: 261
+bundleId: 1123
+url: https://dev-connect.rda.onetakeda.com/content/7301aa9e-28d8-400a-bc78-c0c20a4fa622/
+version: 1
+asMultiple: FALSE
+asStatic: TRUE

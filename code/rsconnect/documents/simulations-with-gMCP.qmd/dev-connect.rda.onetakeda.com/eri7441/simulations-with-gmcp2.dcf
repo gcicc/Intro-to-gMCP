@@ -1,0 +1,14 @@
+name: simulations-with-gmcp2
+title: simulations-with-gMCP
+username: eri7441
+account: eri7441
+server: dev-connect.rda.onetakeda.com
+hostUrl: https://dev-connect.rda.onetakeda.com/__api__
+appId: 258
+bundleId:
+url: https://dev-connect.rda.onetakeda.com/content/dba2d377-a2c0-4eda-96bc-3b04e6cc0c88/
+version: 1
+quarto_version: 1.3.353
+quarto_engines: knitr
+asMultiple: FALSE
+asStatic: FALSE

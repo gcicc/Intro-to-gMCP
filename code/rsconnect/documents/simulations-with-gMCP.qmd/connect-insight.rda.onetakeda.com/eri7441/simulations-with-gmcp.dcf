@@ -1,0 +1,12 @@
+name: simulations-with-gmcp
+title: simulations-with-gMCP
+username: eri7441
+account: eri7441
+server: connect-insight.rda.onetakeda.com
+hostUrl: https://connect-insight.rda.onetakeda.com/__api__
+appId: 1579
+bundleId: 9606
+url: https://connect-insight.rda.onetakeda.com/content/70ae2efe-6c66-4ed1-a9fb-6ff3d4ac4201/
+version: 1
+asMultiple: FALSE
+asStatic: TRUE
